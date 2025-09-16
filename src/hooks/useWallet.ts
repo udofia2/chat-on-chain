@@ -1,38 +1,48 @@
-import { useState, useEffect } from 'react';
-import { WalletState } from '../types';
+import { useAccount, useDisconnect, useBalance, useChainId } from 'wagmi';
+import { useConnectModal } from '@rainbow-me/rainbowkit';
+import { formatEther } from 'viem';
 
 export const useWallet = () => {
-  const [wallet, setWallet] = useState<WalletState>({
-    isConnected: false,
-    address: null,
-    chainId: null,
-    balance: '0'
+  const { address, isConnected, isConnecting } = useAccount();
+  const { disconnect } = useDisconnect();
+  const { openConnectModal } = useConnectModal();
+  const chainId = useChainId();
+  
+  const { data: balance } = useBalance({
+    address: address,
   });
 
-  const connectWallet = async () => {
-    // Simulate wallet connection
-    setTimeout(() => {
-      setWallet({
-        isConnected: true,
-        address: '0x742d35Cc6634C0532925a3b8D1Fd7fA9C9ac1234',
-        chainId: 1,
-        balance: '1,247'
-      });
-    }, 1500);
+  const formatAddress = (addr: string) => {
+    return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  };
+
+  const formatBalance = (balanceData: any) => {
+    if (!balanceData) return '0';
+    const formatted = formatEther(balanceData.value);
+    return parseFloat(formatted).toFixed(4);
+  };
+
+  const connectWallet = () => {
+    if (openConnectModal) {
+      openConnectModal();
+    }
   };
 
   const disconnectWallet = () => {
-    setWallet({
-      isConnected: false,
-      address: null,
-      chainId: null,
-      balance: '0'
-    });
+    disconnect();
   };
 
   return {
-    wallet,
+    wallet: {
+      isConnected,
+      isConnecting,
+      address: address || null,
+      chainId,
+      balance: formatBalance(balance),
+      formattedAddress: address ? formatAddress(address) : null,
+    },
     connectWallet,
-    disconnectWallet
+    disconnectWallet,
+    formatAddress,
   };
 };

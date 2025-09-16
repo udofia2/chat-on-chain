@@ -4,6 +4,7 @@ import { useStore } from '../../store/useStore';
 import { useTheme } from '../../hooks/useTheme';
 import { useWallet } from '../../hooks/useWallet';
 import { Button } from '../ui/Button';
+import { ConnectButton } from '@rainbow-me/rainbowkit';
 
 export const Header: React.FC = () => {
   const { toggleSidebar, currentUser } = useStore();
@@ -63,8 +64,9 @@ export const Header: React.FC = () => {
           >
             {isDark ? <Sun size={20} /> : <Moon size={20} />}
           </button>
+          <ConnectButton />
 
-          {wallet.isConnected ? (
+          {/* {wallet.isConnected ? (
             <div className="flex items-center space-x-3 bg-gray-100 dark:bg-gray-800 rounded-xl p-2">
               <div className="flex items-center space-x-2">
                 <Wallet size={16} className="text-indigo-600" />
@@ -81,7 +83,7 @@ export const Header: React.FC = () => {
                 Disconnect
               </Button>
             </div>
-          ) : null}
+          ) : null} */}
         </div>
       </div>
     </header>

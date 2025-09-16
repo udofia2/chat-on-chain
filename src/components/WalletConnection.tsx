@@ -3,6 +3,7 @@ import { Wallet, Globe, Shield, Users, Zap } from 'lucide-react';
 import { Button } from './ui/Button';
 import { useWallet } from '../hooks/useWallet';
 import { motion } from 'framer-motion';
+import { ConnectButton } from '@rainbow-me/rainbowkit';
 
 interface WalletConnectionProps {
   onConnected: () => void;
@@ -85,7 +86,8 @@ export const WalletConnection: React.FC<WalletConnectionProps> = ({ onConnected 
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.5 }}
           >
-            <Button
+            <ConnectButton />
+            {/* <Button
               variant="primary"
               size="lg"
               onClick={handleConnect}
@@ -94,7 +96,7 @@ export const WalletConnection: React.FC<WalletConnectionProps> = ({ onConnected 
             >
               <Wallet size={24} className="mr-3" />
               {isConnecting ? 'Connecting...' : 'Connect Wallet'}
-            </Button>
+            </Button> */}
           </motion.div>
         </div>
 
