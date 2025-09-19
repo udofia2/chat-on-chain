@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAccount } from 'wagmi';
-import { groupsContract, eventWatcher } from '../contracts/utils/contractCalls';
-import { socketService } from '../lib/websocket/socket';
-import { pinataService } from '../lib/ipfs/pinata';
+import { groupsContract } from '../contracts/utils/contractCalls';
+import { socketService } from '../libs/websocket/socket';
+import { pinataService } from '../libs/ipfs/pinata';
 import { useEns } from './useEns';
 import { useFriends } from './useFriends';
+import { GROUP_TYPES } from '../libs/constants';
 
 interface ChatMessage {
   id: string;
@@ -39,6 +40,13 @@ interface Chat {
   unreadCount: number;
   isAdmin?: boolean;
   createdAt: Date;
+  groupType?: number; // Group type from contract
+  settings?: {
+    isPublic: boolean;
+    requireApproval: boolean;
+    allowInvites: boolean;
+    maxMembers: number;
+  };
 }
 
 interface UseChatReturn {
@@ -51,15 +59,19 @@ interface UseChatReturn {
   setActiveChat: (chat: Chat | null) => void;
   sendMessage: (content: string, type?: 'text') => Promise<boolean>;
   sendFileMessage: (file: File) => Promise<boolean>;
-  createGroup: (name: string, description: string, memberAddresses: string[]) => Promise<boolean>;
+  createGroup: (name: string, description: string, groupType: number, isPublic: boolean, memberAddresses?: string[]) => Promise<boolean>;
   joinGroup: (groupId: string) => Promise<boolean>;
   leaveGroup: (groupId: string) => Promise<boolean>;
   addGroupMember: (groupId: string, memberAddress: string) => Promise<boolean>;
   removeGroupMember: (groupId: string, memberAddress: string) => Promise<boolean>;
+  updateGroupInfo: (groupId: string, name: string, description: string, avatarHash?: string) => Promise<boolean>;
+  updateGroupSettings: (groupId: string, settings: Partial<Chat['settings']>) => Promise<boolean>;
   updateTypingStatus: (isTyping: boolean) => void;
   markAsRead: (chatId: string) => void;
   refreshChats: () => Promise<void>;
   getOrCreatePrivateChat: (friendAddress: string) => Promise<Chat | null>;
+  getPublicGroups: (offset?: number, limit?: number) => Promise<Chat[]>;
+  searchGroups: (query: string, limit?: number) => Promise<Chat[]>;
 }
 
 export const useChat = (): UseChatReturn => {
@@ -75,10 +87,11 @@ export const useChat = (): UseChatReturn => {
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
   /**
-   * Convert group data to chat format
+   * Convert contract group to chat format
    */
   const groupToChat = useCallback(async (groupData: any): Promise<Chat> => {
-    const members = await groupsContract.getGroupMembers(groupData.id);
+    const members = await groupsContract.getGroupMembers(BigInt(groupData.id));
+    const settings = await groupsContract.getGroupSettings(BigInt(groupData.id));
     const participants: ChatParticipant[] = [];
 
     for (const memberAddress of members) {
@@ -102,8 +115,15 @@ export const useChat = (): UseChatReturn => {
       avatar: groupData.avatarHash ? pinataService.getGatewayUrl(groupData.avatarHash) : undefined,
       participants,
       unreadCount: 0,
-      isAdmin: groupData.admin.toLowerCase() === address?.toLowerCase(),
+      isAdmin: await groupsContract.isGroupAdmin(BigInt(groupData.id), address!),
       createdAt: new Date(Number(groupData.createdAt) * 1000),
+      groupType: groupData.groupType,
+      settings: {
+        isPublic: settings.isPublic,
+        requireApproval: settings.requireApproval,
+        allowInvites: settings.allowInvites,
+        maxMembers: Number(settings.maxMembers),
+      },
     };
   }, [address, getProfileByAddress]);
 
@@ -158,16 +178,26 @@ export const useChat = (): UseChatReturn => {
       // Load group chats
       const userGroups = await groupsContract.getUserGroups(address);
       for (const groupId of userGroups) {
-        const groupData = await groupsContract.getGroup(groupId);
-        const chat = await groupToChat(groupData);
-        chatList.push(chat);
+        try {
+          const groupData = await groupsContract.getGroup(groupId);
+          const chat = await groupToChat(groupData);
+          chatList.push(chat);
+        } catch (err) {
+          console.error(`Error loading group ${groupId}:`, err);
+          // Continue loading other groups
+        }
       }
 
       // Load private chats (based on friends)
       for (const friend of friends) {
-        const chat = await friendToChat(friend.address);
-        if (chat) {
-          chatList.push(chat);
+        try {
+          const chat = await friendToChat(friend.address);
+          if (chat) {
+            chatList.push(chat);
+          }
+        } catch (err) {
+          console.error(`Error creating chat for friend ${friend.address}:`, err);
+          // Continue with other friends
         }
       }
 
@@ -338,7 +368,13 @@ export const useChat = (): UseChatReturn => {
   /**
    * Create group
    */
-  const createGroup = useCallback(async (name: string, description: string, memberAddresses: string[]): Promise<boolean> => {
+  const createGroup = useCallback(async (
+    name: string, 
+    description: string, 
+    groupType: number, 
+    isPublic: boolean, 
+    memberAddresses: string[] = []
+  ): Promise<boolean> => {
     if (!address) {
       setError('Wallet not connected');
       return false;
@@ -352,27 +388,407 @@ export const useChat = (): UseChatReturn => {
       const avatarHash = await pinataService.uploadJSON({
         name,
         type: 'group',
-        members: memberAddresses.length + 1, // +1 for creator
+        groupType,
+        creator: address,
+        createdAt: new Date().toISOString(),
       }, {
-        name: `${name}-group-avatar`,
+        name: `${name}-group-metadata`,
       });
 
-      const txHash = await groupsContract.createGroup(name, description, avatarHash);
+      const txHash = await groupsContract.createGroup(name, description, avatarHash, groupType, isPublic);
       console.log('Group created:', txHash);
 
       // Wait for transaction and refresh chats
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      await loadChats();
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
 
       return true;
     } catch (err) {
       console.error('Error creating group:', err);
-      setError('Failed to create group');
+      if (err instanceof Error) {
+        if (err.message.includes('insufficient')) {
+          setError('Insufficient balance for group creation fee');
+        } else if (err.message.includes('invalid name')) {
+          setError('Invalid group name');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to create group');
+      }
       return false;
     } finally {
       setIsLoading(false);
     }
   }, [address, loadChats]);
+
+  /**
+   * Join group
+   */
+  const joinGroup = useCallback(async (groupId: string): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if already a member
+      const isMember = await groupsContract.isGroupMember(groupIdBigInt, address);
+      if (isMember) {
+        setError('Already a member of this group');
+        return false;
+      }
+
+      // For now, we'll assume someone with admin rights adds the user
+      // In a full implementation, this would be a join request system
+      const txHash = await groupsContract.addGroupMember(groupIdBigInt, address);
+      console.log('Joined group:', txHash);
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error joining group:', err);
+      setError('Failed to join group');
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, loadChats]);
+
+  /**
+   * Leave group
+   */
+  const leaveGroup = useCallback(async (groupId: string): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if user is a member
+      const isMember = await groupsContract.isGroupMember(groupIdBigInt, address);
+      if (!isMember) {
+        setError('Not a member of this group');
+        return false;
+      }
+
+      const txHash = await groupsContract.leaveGroup(groupIdBigInt);
+      console.log('Left group:', txHash);
+
+      // Remove from local chats immediately
+      setChats(prev => prev.filter(chat => chat.id !== `group-${groupId}`));
+      
+      // Clear active chat if it was the group we left
+      if (activeChat?.id === `group-${groupId}`) {
+        setActiveChat(null);
+      }
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error leaving group:', err);
+      if (err instanceof Error) {
+        if (err.message.includes('creator cannot leave')) {
+          setError('Group creator cannot leave. Transfer ownership first.');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to leave group');
+      }
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, activeChat, loadChats]);
+
+  /**
+   * Add group member
+   */
+  const addGroupMember = useCallback(async (groupId: string, memberAddress: string): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if user is admin
+      const isAdmin = await groupsContract.isGroupAdmin(groupIdBigInt, address);
+      if (!isAdmin) {
+        setError('Only group admins can add members');
+        return false;
+      }
+
+      // Check if target is already a member
+      const isMember = await groupsContract.isGroupMember(groupIdBigInt, memberAddress);
+      if (isMember) {
+        setError('User is already a member');
+        return false;
+      }
+
+      const txHash = await groupsContract.addGroupMember(groupIdBigInt, memberAddress);
+      console.log('Member added to group:', txHash);
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error adding group member:', err);
+      if (err instanceof Error) {
+        if (err.message.includes('not admin')) {
+          setError('Only group admins can add members');
+        } else if (err.message.includes('group full')) {
+          setError('Group has reached maximum member limit');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to add group member');
+      }
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, loadChats]);
+
+  /**
+   * Remove group member
+   */
+  const removeGroupMember = useCallback(async (groupId: string, memberAddress: string): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if user is admin
+      const isAdmin = await groupsContract.isGroupAdmin(groupIdBigInt, address);
+      if (!isAdmin) {
+        setError('Only group admins can remove members');
+        return false;
+      }
+
+      const txHash = await groupsContract.removeGroupMember(groupIdBigInt, memberAddress);
+      console.log('Member removed from group:', txHash);
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error removing group member:', err);
+      if (err instanceof Error) {
+        if (err.message.includes('not admin')) {
+          setError('Only group admins can remove members');
+        } else if (err.message.includes('cannot remove creator')) {
+          setError('Cannot remove group creator');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to remove group member');
+      }
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, loadChats]);
+
+  /**
+   * Update group information
+   */
+  const updateGroupInfo = useCallback(async (
+    groupId: string, 
+    name: string, 
+    description: string, 
+    avatarHash?: string
+  ): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if user is admin
+      const isAdmin = await groupsContract.isGroupAdmin(groupIdBigInt, address);
+      if (!isAdmin) {
+        setError('Only group admins can update group information');
+        return false;
+      }
+
+      const txHash = await groupsContract.updateGroupInfo(
+        groupIdBigInt, 
+        name, 
+        description, 
+        avatarHash || ''
+      );
+      console.log('Group info updated:', txHash);
+
+      // Update local state immediately
+      setChats(prev => prev.map(chat => 
+        chat.id === `group-${groupId}` 
+          ? { ...chat, name, description, avatar: avatarHash ? pinataService.getGatewayUrl(avatarHash) : chat.avatar }
+          : chat
+      ));
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error updating group info:', err);
+      setError('Failed to update group information');
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, loadChats]);
+
+  /**
+   * Update group settings
+   */
+  const updateGroupSettings = useCallback(async (
+    groupId: string, 
+    settings: Partial<Chat['settings']>
+  ): Promise<boolean> => {
+    if (!address) {
+      setError('Wallet not connected');
+      return false;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const groupIdBigInt = BigInt(groupId);
+      
+      // Check if user is admin
+      const isAdmin = await groupsContract.isGroupAdmin(groupIdBigInt, address);
+      if (!isAdmin) {
+        setError('Only group admins can update group settings');
+        return false;
+      }
+
+      // Get current settings and merge with updates
+      const currentSettings = await groupsContract.getGroupSettings(groupIdBigInt);
+      const newSettings = {
+        isPublic: settings.isPublic ?? currentSettings.isPublic,
+        requireApproval: settings.requireApproval ?? currentSettings.requireApproval,
+        allowInvites: settings.allowInvites ?? currentSettings.allowInvites,
+        maxMembers: settings.maxMembers ?? Number(currentSettings.maxMembers),
+      };
+
+      const txHash = await groupsContract.updateGroupSettings(
+        groupIdBigInt,
+        newSettings.isPublic,
+        newSettings.requireApproval,
+        newSettings.allowInvites,
+        newSettings.maxMembers
+      );
+      console.log('Group settings updated:', txHash);
+
+      // Update local state immediately
+      setChats(prev => prev.map(chat => 
+        chat.id === `group-${groupId}` 
+          ? { ...chat, settings: newSettings }
+          : chat
+      ));
+
+      // Refresh chats after transaction
+      setTimeout(async () => {
+        await loadChats();
+      }, 5000);
+
+      return true;
+    } catch (err) {
+      console.error('Error updating group settings:', err);
+      setError('Failed to update group settings');
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, loadChats]);
+
+  /**
+   * Get public groups
+   */
+  const getPublicGroups = useCallback(async (offset: number = 0, limit: number = 20): Promise<Chat[]> => {
+    try {
+      const groups = await groupsContract.getPublicGroups(offset, limit);
+      const chats: Chat[] = [];
+
+      for (const group of groups) {
+        const chat = await groupToChat(group);
+        chats.push(chat);
+      }
+
+      return chats;
+    } catch (err) {
+      console.error('Error getting public groups:', err);
+      return [];
+    }
+  }, [groupToChat]);
+
+  /**
+   * Search groups
+   */
+  const searchGroups = useCallback(async (query: string, limit: number = 10): Promise<Chat[]> => {
+    try {
+      const groups = await groupsContract.searchGroups(query, limit);
+      const chats: Chat[] = [];
+
+      for (const group of groups) {
+        const chat = await groupToChat(group);
+        chats.push(chat);
+      }
+
+      return chats;
+    } catch (err) {
+      console.error('Error searching groups:', err);
+      return [];
+    }
+  }, [groupToChat]);
 
   /**
    * Update typing status
@@ -398,31 +814,6 @@ export const useChat = (): UseChatReturn => {
   const refreshChats = useCallback(async () => {
     await loadChats();
   }, [loadChats]);
-
-  // Placeholder implementations for group management
-  const joinGroup = useCallback(async (groupId: string): Promise<boolean> => {
-    // TODO: Implement group joining logic
-    console.log('Join group:', groupId);
-    return true;
-  }, []);
-
-  const leaveGroup = useCallback(async (groupId: string): Promise<boolean> => {
-    // TODO: Implement group leaving logic
-    console.log('Leave group:', groupId);
-    return true;
-  }, []);
-
-  const addGroupMember = useCallback(async (groupId: string, memberAddress: string): Promise<boolean> => {
-    // TODO: Implement add member logic
-    console.log('Add member:', groupId, memberAddress);
-    return true;
-  }, []);
-
-  const removeGroupMember = useCallback(async (groupId: string, memberAddress: string): Promise<boolean> => {
-    // TODO: Implement remove member logic
-    console.log('Remove member:', groupId, memberAddress);
-    return true;
-  }, []);
 
   // Load chats when dependencies change
   useEffect(() => {
@@ -476,7 +867,7 @@ export const useChat = (): UseChatReturn => {
       setMessages([]); // Clear messages when switching chats
       setTypingUsers([]);
       
-      // TODO: Load message history for this chat
+      // TODO: Load message history for this chat from storage/IPFS
       
       return () => {
         socketService.leaveRoom(activeChat.id);
@@ -499,9 +890,13 @@ export const useChat = (): UseChatReturn => {
     leaveGroup,
     addGroupMember,
     removeGroupMember,
+    updateGroupInfo,
+    updateGroupSettings,
     updateTypingStatus,
     markAsRead,
     refreshChats,
     getOrCreatePrivateChat,
+    getPublicGroups,
+    searchGroups,
   };
 };

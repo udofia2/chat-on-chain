@@ -1,28 +1,27 @@
 import { createPublicClient, createWalletClient, http, getContract, parseEther } from 'viem';
-import { mainnet, polygon, optimism } from 'viem/chains';
+import { mainnet, polygon, optimism, arbitrum, base, sepolia } from 'viem/chains';
 import { CONTRACT_ADDRESSES } from '../../libs/constants';
 
-import ensAbi from '../abi/Ens.json';
-import friendsAbi from '../abi/Friends.json';
-import groupsAbi from '../abi/Groups.json';
+import ensAbi from '../abi/ChainChatENS.json';
+import friendsAbi from '../abi/ChainChatFriends.json';
+import groupsAbi from '../abi/ChainChatGroups.json';
 import chatTokenAbi from '../abi/ChatToken.json';
-
-import type { EnsContract } from '../types/Ens';
-import type { FriendsContract } from '../types/Friends';
-import type { GroupsContract } from '../types/Groups';
 
 // Chain configuration
 const chains = {
   1: mainnet,
   137: polygon,
   10: optimism,
+  42161: arbitrum,
+  8453: base,
+  11155111: sepolia, // Testnet
 };
 
 /**
  * Get public client for reading contract data
  */
-export const getPublicClient = (chainId: number = 137) => {
-  const chain = chains[chainId as keyof typeof chains] || polygon;
+export const getPublicClient = (chainId: number = 11155111) => {
+  const chain = chains[chainId as keyof typeof chains] || sepolia;
   
   return createPublicClient({
     chain,
@@ -33,8 +32,8 @@ export const getPublicClient = (chainId: number = 137) => {
 /**
  * Get wallet client for writing to contracts
  */
-export const getWalletClient = (chainId: number = 137) => {
-  const chain = chains[chainId as keyof typeof chains] || polygon;
+export const getWalletClient = (chainId: number = 11155111) => {
+  const chain = chains[chainId as keyof typeof chains] || sepolia;
   
   return createWalletClient({
     chain,
@@ -49,7 +48,7 @@ export class EnsContractService {
   private publicClient: any;
   private walletClient: any;
 
-  constructor(chainId: number = 137) {
+  constructor(chainId: number = 11155111) {
     this.publicClient = getPublicClient(chainId);
     this.walletClient = getWalletClient(chainId);
   }
@@ -91,11 +90,27 @@ export class EnsContractService {
     return await contract.read.getProfile([address]);
   }
 
+  async getRegistrationFee(): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getRegistrationFee();
+  }
+
+  async getTotalUsers(): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getTotalUsers();
+  }
+
+  async isRegistered(address: string): Promise<boolean> {
+    const contract = this.getReadContract();
+    return await contract.read.isRegistered([address]);
+  }
+
   // Write functions
   async registerUsername(username: string) {
     const contract = this.getWriteContract();
+    const fee = await this.getRegistrationFee();
     return await contract.write.register([username], {
-      value: parseEther('0.01'), // Registration fee
+      value: fee,
     });
   }
 
@@ -108,6 +123,11 @@ export class EnsContractService {
     const contract = this.getWriteContract();
     return await contract.write.setAvatar([avatarHash]);
   }
+
+  async updateProfile(bio: string, avatarHash: string) {
+    const contract = this.getWriteContract();
+    return await contract.write.updateProfile([bio, avatarHash]);
+  }
 }
 
 /**
@@ -117,7 +137,7 @@ export class FriendsContractService {
   private publicClient: any;
   private walletClient: any;
 
-  constructor(chainId: number = 137) {
+  constructor(chainId: number = 11155111) {
     this.publicClient = getPublicClient(chainId);
     this.walletClient = getWalletClient(chainId);
   }
@@ -159,6 +179,21 @@ export class FriendsContractService {
     return await contract.read.getFriendCount([address]);
   }
 
+  async friendRequestExists(from: string, to: string): Promise<boolean> {
+    const contract = this.getReadContract();
+    return await contract.read.friendRequestExists([from, to]);
+  }
+
+  async getFriendRequest(from: string, to: string) {
+    const contract = this.getReadContract();
+    return await contract.read.getFriendRequest([from, to]);
+  }
+
+  async getFriendSuggestions(address: string, limit: number): Promise<string[]> {
+    const contract = this.getReadContract();
+    return await contract.read.getFriendSuggestions([address, BigInt(limit)]);
+  }
+
   // Write functions
   async sendFriendRequest(friendAddress: string, message: string) {
     const contract = this.getWriteContract();
@@ -188,7 +223,7 @@ export class GroupsContractService {
   private publicClient: any;
   private walletClient: any;
 
-  constructor(chainId: number = 137) {
+  constructor(chainId: number = 11155111) {
     this.publicClient = getPublicClient(chainId);
     this.walletClient = getWalletClient(chainId);
   }
@@ -235,10 +270,38 @@ export class GroupsContractService {
     return await contract.read.isAdmin([groupId, address]);
   }
 
+  async getGroupSettings(groupId: bigint) {
+    const contract = this.getReadContract();
+    return await contract.read.getGroupSettings([groupId]);
+  }
+
+  async getPublicGroups(offset: number, limit: number) {
+    const contract = this.getReadContract();
+    return await contract.read.getPublicGroups([BigInt(offset), BigInt(limit)]);
+  }
+
+  async searchGroups(query: string, limit: number) {
+    const contract = this.getReadContract();
+    return await contract.read.searchGroups([query, BigInt(limit)]);
+  }
+
+  async getTotalGroups(): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getTotalGroups();
+  }
+
   // Write functions
-  async createGroup(name: string, description: string, avatarHash: string) {
+  async createGroup(
+    name: string, 
+    description: string, 
+    avatarHash: string, 
+    groupType: number, 
+    isPublic: boolean
+  ) {
     const contract = this.getWriteContract();
-    return await contract.write.createGroup([name, description, avatarHash]);
+    return await contract.write.createGroup([name, description, avatarHash, groupType, isPublic], {
+      value: parseEther('0.001'), // GROUP_CREATION_FEE
+    });
   }
 
   async addGroupMember(groupId: bigint, memberAddress: string) {
@@ -256,9 +319,35 @@ export class GroupsContractService {
     return await contract.write.leaveGroup([groupId]);
   }
 
-  async updateGroupInfo(groupId: bigint, name: string, description: string) {
+  async addGroupAdmin(groupId: bigint, adminAddress: string) {
     const contract = this.getWriteContract();
-    return await contract.write.updateGroupInfo([groupId, name, description]);
+    return await contract.write.addAdmin([groupId, adminAddress]);
+  }
+
+  async removeGroupAdmin(groupId: bigint, adminAddress: string) {
+    const contract = this.getWriteContract();
+    return await contract.write.removeAdmin([groupId, adminAddress]);
+  }
+
+  async updateGroupInfo(groupId: bigint, name: string, description: string, avatarHash: string) {
+    const contract = this.getWriteContract();
+    return await contract.write.updateGroupInfo([groupId, name, description, avatarHash]);
+  }
+
+  async updateGroupSettings(
+    groupId: bigint, 
+    isPublic: boolean, 
+    requireApproval: boolean, 
+    allowInvites: boolean, 
+    maxMembers: number
+  ) {
+    const contract = this.getWriteContract();
+    return await contract.write.updateGroupSettings([groupId, isPublic, requireApproval, allowInvites, BigInt(maxMembers)]);
+  }
+
+  async transferGroupOwnership(groupId: bigint, newOwner: string) {
+    const contract = this.getWriteContract();
+    return await contract.write.transferOwnership([groupId, newOwner]);
   }
 }
 
@@ -269,7 +358,7 @@ export class ChatTokenContractService {
   private publicClient: any;
   private walletClient: any;
 
-  constructor(chainId: number = 137) {
+  constructor(chainId: number = 11155111) {
     this.publicClient = getPublicClient(chainId);
     this.walletClient = getWalletClient(chainId);
   }
@@ -316,15 +405,55 @@ export class ChatTokenContractService {
     return await contract.read.totalSupply();
   }
 
+  async getTotalEarned(address: string): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getTotalEarned([address]);
+  }
+
+  async getActivityCount(address: string, activity: string): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getActivityCount([address, activity]);
+  }
+
+  async getActivityReward(activity: string): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getActivityReward([activity]);
+  }
+
+  async getUserStats(address: string) {
+    const contract = this.getReadContract();
+    return await contract.read.getUserStats([address]);
+  }
+
+  async getTimeUntilNextClaim(address: string): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getTimeUntilNextClaim([address]);
+  }
+
+  async getRewardMultiplier(address: string): Promise<bigint> {
+    const contract = this.getReadContract();
+    return await contract.read.getRewardMultiplier([address]);
+  }
+
   // Write functions
   async claimDailyReward() {
     const contract = this.getWriteContract();
     return await contract.write.claimDailyReward();
   }
 
+  async claimPendingRewards() {
+    const contract = this.getWriteContract();
+    return await contract.write.claimPendingRewards();
+  }
+
   async rewardActivity(userAddress: string, activity: string) {
     const contract = this.getWriteContract();
     return await contract.write.rewardActivity([userAddress, activity]);
+  }
+
+  async burn(amount: bigint) {
+    const contract = this.getWriteContract();
+    return await contract.write.burn([amount]);
   }
 }
 
@@ -334,7 +463,7 @@ export class ChatTokenContractService {
 export class ContractEventWatcher {
   private publicClient: any;
 
-  constructor(chainId: number = 137) {
+  constructor(chainId: number = 11155111) {
     this.publicClient = getPublicClient(chainId);
   }
 
@@ -353,6 +482,15 @@ export class ContractEventWatcher {
       address: CONTRACT_ADDRESSES.ENS as `0x${string}`,
       abi: ensAbi,
       eventName: 'BioUpdated',
+      onLogs: callback,
+    });
+  }
+
+  watchAvatarUpdates(callback: (log: any) => void) {
+    return this.publicClient.watchContractEvent({
+      address: CONTRACT_ADDRESSES.ENS as `0x${string}`,
+      abi: ensAbi,
+      eventName: 'AvatarUpdated',
       onLogs: callback,
     });
   }
@@ -376,21 +514,20 @@ export class ContractEventWatcher {
     });
   }
 
-  // Watch Groups events
-  watchGroupCreation(callback: (log: any) => void) {
+  watchFriendRequestDeclined(callback: (log: any) => void) {
     return this.publicClient.watchContractEvent({
-      address: CONTRACT_ADDRESSES.GROUPS as `0x${string}`,
-      abi: groupsAbi,
-      eventName: 'GroupCreated',
+      address: CONTRACT_ADDRESSES.FRIENDS as `0x${string}`,
+      abi: friendsAbi,
+      eventName: 'FriendRequestDeclined',
       onLogs: callback,
     });
   }
 
-  watchGroupMemberChanges(callback: (log: any) => void) {
+  watchFriendshipRemoved(callback: (log: any) => void) {
     return this.publicClient.watchContractEvent({
-      address: CONTRACT_ADDRESSES.GROUPS as `0x${string}`,
-      abi: groupsAbi,
-      eventName: 'MemberAdded',
+      address: CONTRACT_ADDRESSES.FRIENDS as `0x${string}`,
+      abi: friendsAbi,
+      eventName: 'FriendshipRemoved',
       onLogs: callback,
     });
   }
@@ -401,6 +538,15 @@ export class ContractEventWatcher {
       address: CONTRACT_ADDRESSES.CHAT_TOKEN as `0x${string}`,
       abi: chatTokenAbi,
       eventName: 'TokensRewarded',
+      onLogs: callback,
+    });
+  }
+
+  watchDailyRewardClaimed(callback: (log: any) => void) {
+    return this.publicClient.watchContractEvent({
+      address: CONTRACT_ADDRESSES.CHAT_TOKEN as `0x${string}`,
+      abi: chatTokenAbi,
+      eventName: 'DailyRewardClaimed',
       onLogs: callback,
     });
   }

@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAccount, useChainId } from 'wagmi';
 import { ensContract, eventWatcher } from '../contracts/utils/contractCalls';
-import { APP_CONFIG } from '../libs/constants';
-import pinataService from '../libs/ipfs/pinata';
+import { APP_CONFIG, CONTRACT_CONSTANTS } from '../libs/constants';
+import { pinataService } from '../libs/ipfs/pinata';
+import { formatEther } from 'viem';
 
 interface EnsProfile {
   username: string;
@@ -25,6 +26,7 @@ interface UseEnsReturn {
   getProfileByAddress: (address: string) => Promise<EnsProfile | null>;
   getAddressByUsername: (username: string) => Promise<string | null>;
   refreshProfile: () => Promise<void>;
+  getRegistrationFee: () => Promise<string>;
 }
 
 export const useEns = (): UseEnsReturn => {
@@ -45,9 +47,26 @@ export const useEns = (): UseEnsReturn => {
     setError(null);
 
     try {
+      // Check if user is registered first
+      const isRegistered = await ensContract.isRegistered(targetAddress);
+      
+      if (!isRegistered) {
+        setProfile({
+          username: '',
+          bio: '',
+          avatarHash: '',
+          avatarUrl: '',
+          ensName: '',
+          registrationTime: new Date(),
+          isRegistered: false,
+        });
+        return;
+      }
+
+      // Get complete profile
       const contractProfile = await ensContract.getProfile(targetAddress);
       
-      if (contractProfile.username) {
+      if (contractProfile.exists && contractProfile.username) {
         const avatarUrl = contractProfile.avatarHash 
           ? pinataService.getGatewayUrl(contractProfile.avatarHash)
           : `${APP_CONFIG.DICEBEAR_API}?seed=${contractProfile.username}`;
@@ -64,6 +83,7 @@ export const useEns = (): UseEnsReturn => {
 
         setProfile(profile);
       } else {
+        // Registered but no profile data (shouldn't happen normally)
         setProfile({
           username: '',
           bio: '',
@@ -76,7 +96,7 @@ export const useEns = (): UseEnsReturn => {
       }
     } catch (err) {
       console.error('Error loading ENS profile:', err);
-      setError('Failed to load profile');
+      setError(err instanceof Error ? err.message : 'Failed to load profile');
       setProfile({
         username: '',
         bio: '',
@@ -97,10 +117,18 @@ export const useEns = (): UseEnsReturn => {
   const checkUsernameAvailability = useCallback(async (username: string): Promise<boolean> => {
     try {
       setError(null);
+      
+      // Validate username format client-side first
+      if (username.length < CONTRACT_CONSTANTS.ENS.MIN_USERNAME_LENGTH || 
+          username.length > CONTRACT_CONSTANTS.ENS.MAX_USERNAME_LENGTH) {
+        throw new Error(`Username must be between ${CONTRACT_CONSTANTS.ENS.MIN_USERNAME_LENGTH} and ${CONTRACT_CONSTANTS.ENS.MAX_USERNAME_LENGTH} characters`);
+      }
+
+      // Check against contract
       return await ensContract.isUsernameAvailable(username);
     } catch (err) {
       console.error('Error checking username availability:', err);
-      setError('Failed to check username availability');
+      setError(err instanceof Error ? err.message : 'Failed to check username availability');
       return false;
     }
   }, []);
@@ -125,18 +153,39 @@ export const useEns = (): UseEnsReturn => {
         return false;
       }
 
-      // Register username
+      // Check if user is already registered
+      const alreadyRegistered = await ensContract.isRegistered(address);
+      if (alreadyRegistered) {
+        setError('User already has a registered username');
+        return false;
+      }
+
+      // Register username (contract handles fee)
       const txHash = await ensContract.registerUsername(username);
       console.log('Registration transaction:', txHash);
 
-      // Wait for transaction and reload profile
-      await new Promise(resolve => setTimeout(resolve, 3000)); // Simple wait
+      // Wait a bit for transaction to be mined, then reload profile
+      await new Promise(resolve => setTimeout(resolve, 5000));
       await loadProfile();
 
       return true;
     } catch (err) {
       console.error('Error registering username:', err);
-      setError('Failed to register username');
+      
+      // Parse contract errors
+      if (err instanceof Error) {
+        if (err.message.includes('insufficient')) {
+          setError('Insufficient balance for registration fee');
+        } else if (err.message.includes('already taken')) {
+          setError('Username is already taken');
+        } else if (err.message.includes('invalid')) {
+          setError('Invalid username format');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to register username');
+      }
       return false;
     } finally {
       setIsLoading(false);
@@ -144,7 +193,7 @@ export const useEns = (): UseEnsReturn => {
   }, [address, checkUsernameAvailability, loadProfile]);
 
   /**
-   * Update profile information
+   * Update profile information (bio and/or avatar)
    */
   const updateProfile = useCallback(async (updates: Partial<Pick<EnsProfile, 'bio' | 'avatarHash'>>): Promise<boolean> => {
     if (!address || !profile?.isRegistered) {
@@ -156,19 +205,23 @@ export const useEns = (): UseEnsReturn => {
     setError(null);
 
     try {
-      const promises: Promise<any>[] = [];
-
-      if (updates.bio !== undefined) {
-        promises.push(ensContract.updateBio(updates.bio));
+      // If both bio and avatar are being updated, use the combined function
+      if (updates.bio !== undefined && updates.avatarHash !== undefined) {
+        await ensContract.updateProfile(updates.bio, updates.avatarHash);
+      } else if (updates.bio !== undefined) {
+        // Validate bio length
+        if (updates.bio.length > CONTRACT_CONSTANTS.ENS.MAX_BIO_LENGTH) {
+          throw new Error(`Bio must be less than ${CONTRACT_CONSTANTS.ENS.MAX_BIO_LENGTH} characters`);
+        }
+        await ensContract.updateBio(updates.bio);
+      } else if (updates.avatarHash !== undefined) {
+        if (!updates.avatarHash) {
+          throw new Error('Avatar hash cannot be empty');
+        }
+        await ensContract.updateAvatar(updates.avatarHash);
       }
 
-      if (updates.avatarHash !== undefined) {
-        promises.push(ensContract.updateAvatar(updates.avatarHash));
-      }
-
-      await Promise.all(promises);
-
-      // Update local state
+      // Update local state immediately for better UX
       setProfile(prev => prev ? {
         ...prev,
         ...updates,
@@ -177,15 +230,28 @@ export const useEns = (): UseEnsReturn => {
           : prev.avatarUrl
       } : null);
 
+      // Reload from contract to ensure consistency
+      setTimeout(() => loadProfile(), 2000);
+
       return true;
     } catch (err) {
       console.error('Error updating profile:', err);
-      setError('Failed to update profile');
+      if (err instanceof Error) {
+        if (err.message.includes('too long')) {
+          setError('Bio is too long');
+        } else if (err.message.includes('invalid')) {
+          setError('Invalid avatar hash');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to update profile');
+      }
       return false;
     } finally {
       setIsLoading(false);
     }
-  }, [address, profile]);
+  }, [address, profile, loadProfile]);
 
   /**
    * Upload avatar to IPFS and update profile
@@ -219,6 +285,7 @@ export const useEns = (): UseEnsReturn => {
         keyvalues: {
           type: 'avatar',
           username: profile.username,
+          uploadedBy: address,
         }
       });
 
@@ -227,7 +294,7 @@ export const useEns = (): UseEnsReturn => {
       return success;
     } catch (err) {
       console.error('Error uploading avatar:', err);
-      setError('Failed to upload avatar');
+      setError(err instanceof Error ? err.message : 'Failed to upload avatar');
       return false;
     } finally {
       setIsLoading(false);
@@ -239,9 +306,12 @@ export const useEns = (): UseEnsReturn => {
    */
   const getProfileByAddress = useCallback(async (userAddress: string): Promise<EnsProfile | null> => {
     try {
+      const isRegistered = await ensContract.isRegistered(userAddress);
+      if (!isRegistered) return null;
+
       const contractProfile = await ensContract.getProfile(userAddress);
       
-      if (!contractProfile.username) return null;
+      if (!contractProfile.exists || !contractProfile.username) return null;
 
       const avatarUrl = contractProfile.avatarHash 
         ? pinataService.getGatewayUrl(contractProfile.avatarHash)
@@ -284,6 +354,19 @@ export const useEns = (): UseEnsReturn => {
     }
   }, [address, loadProfile]);
 
+  /**
+   * Get registration fee in ETH
+   */
+  const getRegistrationFee = useCallback(async (): Promise<string> => {
+    try {
+      const fee = await ensContract.getRegistrationFee();
+      return formatEther(fee);
+    } catch (err) {
+      console.error('Error getting registration fee:', err);
+      return CONTRACT_CONSTANTS.ENS.REGISTRATION_FEE; // Fallback to constant
+    }
+  }, []);
+
   // Load profile when address changes
   useEffect(() => {
     if (address) {
@@ -293,14 +376,15 @@ export const useEns = (): UseEnsReturn => {
     }
   }, [address, loadProfile]);
 
-  // Set up event listeners
+  // Set up event listeners for real-time updates
   useEffect(() => {
     if (!address) return;
 
     const unsubscribeRegistration = eventWatcher.watchUsernameRegistrations((logs) => {
       logs.forEach((log: any) => {
         if (log.args.owner.toLowerCase() === address.toLowerCase()) {
-          loadProfile();
+          console.log('Username registered event received');
+          setTimeout(() => loadProfile(), 1000); // Small delay for blockchain confirmation
         }
       });
     });
@@ -308,7 +392,17 @@ export const useEns = (): UseEnsReturn => {
     const unsubscribeProfile = eventWatcher.watchProfileUpdates((logs) => {
       logs.forEach((log: any) => {
         if (log.args.user.toLowerCase() === address.toLowerCase()) {
-          loadProfile();
+          console.log('Profile updated event received');
+          setTimeout(() => loadProfile(), 1000);
+        }
+      });
+    });
+
+    const unsubscribeAvatar = eventWatcher.watchAvatarUpdates((logs) => {
+      logs.forEach((log: any) => {
+        if (log.args.user.toLowerCase() === address.toLowerCase()) {
+          console.log('Avatar updated event received');
+          setTimeout(() => loadProfile(), 1000);
         }
       });
     });
@@ -316,6 +410,7 @@ export const useEns = (): UseEnsReturn => {
     return () => {
       unsubscribeRegistration?.();
       unsubscribeProfile?.();
+      unsubscribeAvatar?.();
     };
   }, [address, loadProfile]);
 
@@ -330,5 +425,6 @@ export const useEns = (): UseEnsReturn => {
     getProfileByAddress,
     getAddressByUsername,
     refreshProfile,
+    getRegistrationFee,
   };
 };

@@ -223,6 +223,7 @@ export const Profile: React.FC = () => {
                   <option>Ethereum Mainnet</option>
                   <option>Polygon</option>
                   <option>Optimism</option>
+                  <option>sepolia</option>
                 </select>
               </div>
             </div>

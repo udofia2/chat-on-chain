@@ -10,6 +10,8 @@ import { useStore } from './store/useStore';
 import { useWallet } from './hooks/useWallet';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AppProvider } from './context/AppContext';
+   import { ContractTest } from './components/ContractTest';
+
 
 function App() {
   const { activeSection, setCurrentUser, currentUser } = useStore();
@@ -78,6 +80,7 @@ function App() {
                   transition={{ duration: 0.2 }}
                   className="h-full"
                 >
+                    <ContractTest />
                   {renderActiveSection()}
                 </motion.div>
               </AnimatePresence>

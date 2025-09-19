@@ -36,6 +36,7 @@ interface UseFriendsReturn {
   searchFriendByUsername: (username: string) => Promise<FriendProfile | null>;
   refreshFriends: () => Promise<void>;
   refreshRequests: () => Promise<void>;
+  getFriendSuggestions: (limit?: number) => Promise<FriendProfile[]>;
 }
 
 export const useFriends = (): UseFriendsReturn => {
@@ -82,6 +83,7 @@ export const useFriends = (): UseFriendsReturn => {
       const friendAddresses = await friendsContract.getFriends(address);
       const friendProfiles: FriendProfile[] = [];
 
+      // Load profiles for each friend
       for (const friendAddress of friendAddresses) {
         const profile = await addressToFriendProfile(friendAddress);
         if (profile) {
@@ -92,7 +94,7 @@ export const useFriends = (): UseFriendsReturn => {
       setFriends(friendProfiles);
     } catch (err) {
       console.error('Error loading friends:', err);
-      setError('Failed to load friends');
+      setError(err instanceof Error ? err.message : 'Failed to load friends');
     } finally {
       setIsLoading(false);
     }
@@ -111,6 +113,7 @@ export const useFriends = (): UseFriendsReturn => {
       const requests = await friendsContract.getPendingRequests(address);
       const requestData: FriendRequestData[] = [];
 
+      // Convert contract requests to our format
       for (const request of requests) {
         const fromProfile = await addressToFriendProfile(request.from);
         const toProfile = await addressToFriendProfile(address);
@@ -130,7 +133,7 @@ export const useFriends = (): UseFriendsReturn => {
       setFriendRequests(requestData);
     } catch (err) {
       console.error('Error loading friend requests:', err);
-      setError('Failed to load friend requests');
+      setError(err instanceof Error ? err.message : 'Failed to load friend requests');
     } finally {
       setIsLoading(false);
     }
@@ -161,18 +164,45 @@ export const useFriends = (): UseFriendsReturn => {
         return false;
       }
 
+      // Check if request already exists
+      const requestExists = await friendsContract.friendRequestExists(address, friendAddress);
+      if (requestExists) {
+        setError('Friend request already sent');
+        return false;
+      }
+
+      // Validate message length (contract limit is 200 chars)
+      if (message.length > 200) {
+        setError('Message too long (max 200 characters)');
+        return false;
+      }
+
       // Send request
       const txHash = await friendsContract.sendFriendRequest(friendAddress, message);
       console.log('Friend request sent:', txHash);
 
-      // Wait for transaction and refresh requests
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      await loadFriendRequests();
+      // Wait for transaction confirmation, then refresh
+      setTimeout(async () => {
+        await loadFriendRequests();
+      }, 3000);
 
       return true;
     } catch (err) {
       console.error('Error sending friend request:', err);
-      setError('Failed to send friend request');
+      
+      if (err instanceof Error) {
+        if (err.message.includes('not registered')) {
+          setError('Target user is not registered');
+        } else if (err.message.includes('already sent')) {
+          setError('Friend request already sent');
+        } else if (err.message.includes('already friends')) {
+          setError('Already friends with this user');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to send friend request');
+      }
       return false;
     } finally {
       setIsLoading(false);
@@ -192,17 +222,28 @@ export const useFriends = (): UseFriendsReturn => {
     setError(null);
 
     try {
+      // Verify request exists
+      const requestExists = await friendsContract.friendRequestExists(requesterAddress, address);
+      if (!requestExists) {
+        setError('Friend request not found');
+        return false;
+      }
+
       const txHash = await friendsContract.acceptFriendRequest(requesterAddress);
       console.log('Friend request accepted:', txHash);
 
-      // Wait for transaction and refresh both friends and requests
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      await Promise.all([loadFriends(), loadFriendRequests()]);
+      // Remove request from local state immediately for better UX
+      setFriendRequests(prev => prev.filter(req => req.from.address !== requesterAddress));
+
+      // Wait for transaction confirmation, then refresh both friends and requests
+      setTimeout(async () => {
+        await Promise.all([loadFriends(), loadFriendRequests()]);
+      }, 3000);
 
       return true;
     } catch (err) {
       console.error('Error accepting friend request:', err);
-      setError('Failed to accept friend request');
+      setError(err instanceof Error ? err.message : 'Failed to accept friend request');
       return false;
     } finally {
       setIsLoading(false);
@@ -222,17 +263,28 @@ export const useFriends = (): UseFriendsReturn => {
     setError(null);
 
     try {
+      // Verify request exists
+      const requestExists = await friendsContract.friendRequestExists(requesterAddress, address);
+      if (!requestExists) {
+        setError('Friend request not found');
+        return false;
+      }
+
       const txHash = await friendsContract.declineFriendRequest(requesterAddress);
       console.log('Friend request declined:', txHash);
 
-      // Wait for transaction and refresh requests
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      await loadFriendRequests();
+      // Remove request from local state immediately
+      setFriendRequests(prev => prev.filter(req => req.from.address !== requesterAddress));
+
+      // Wait for transaction confirmation, then refresh requests
+      setTimeout(async () => {
+        await loadFriendRequests();
+      }, 3000);
 
       return true;
     } catch (err) {
       console.error('Error declining friend request:', err);
-      setError('Failed to decline friend request');
+      setError(err instanceof Error ? err.message : 'Failed to decline friend request');
       return false;
     } finally {
       setIsLoading(false);
@@ -252,17 +304,28 @@ export const useFriends = (): UseFriendsReturn => {
     setError(null);
 
     try {
+      // Verify friendship exists
+      const areFriends = await friendsContract.areFriends(address, friendAddress);
+      if (!areFriends) {
+        setError('Not friends with this user');
+        return false;
+      }
+
       const txHash = await friendsContract.removeFriend(friendAddress);
       console.log('Friend removed:', txHash);
 
-      // Wait for transaction and refresh friends
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      await loadFriends();
+      // Remove friend from local state immediately
+      setFriends(prev => prev.filter(friend => friend.address !== friendAddress));
+
+      // Wait for transaction confirmation, then refresh
+      setTimeout(async () => {
+        await loadFriends();
+      }, 3000);
 
       return true;
     } catch (err) {
       console.error('Error removing friend:', err);
-      setError('Failed to remove friend');
+      setError(err instanceof Error ? err.message : 'Failed to remove friend');
       return false;
     } finally {
       setIsLoading(false);
@@ -314,6 +377,30 @@ export const useFriends = (): UseFriendsReturn => {
   }, [getAddressByUsername, addressToFriendProfile]);
 
   /**
+   * Get friend suggestions (using contract function)
+   */
+  const getFriendSuggestions = useCallback(async (limit: number = 5): Promise<FriendProfile[]> => {
+    if (!address) return [];
+
+    try {
+      const suggestionAddresses = await friendsContract.getFriendSuggestions(address, limit);
+      const suggestions: FriendProfile[] = [];
+
+      for (const suggestionAddress of suggestionAddresses) {
+        const profile = await addressToFriendProfile(suggestionAddress);
+        if (profile) {
+          suggestions.push(profile);
+        }
+      }
+
+      return suggestions;
+    } catch (err) {
+      console.error('Error getting friend suggestions:', err);
+      return [];
+    }
+  }, [address, addressToFriendProfile]);
+
+  /**
    * Refresh friends list
    */
   const refreshFriends = useCallback(async () => {
@@ -337,14 +424,15 @@ export const useFriends = (): UseFriendsReturn => {
     }
   }, [address, loadFriends, loadFriendRequests]);
 
-  // Set up event listeners
+  // Set up event listeners for real-time updates
   useEffect(() => {
     if (!address) return;
 
     const unsubscribeRequests = eventWatcher.watchFriendRequests((logs) => {
       logs.forEach((log: any) => {
         if (log.args.to.toLowerCase() === address.toLowerCase()) {
-          loadFriendRequests();
+          console.log('Friend request received');
+          setTimeout(() => loadFriendRequests(), 1000);
         }
       });
     });
@@ -353,7 +441,30 @@ export const useFriends = (): UseFriendsReturn => {
       logs.forEach((log: any) => {
         if (log.args.from.toLowerCase() === address.toLowerCase() || 
             log.args.to.toLowerCase() === address.toLowerCase()) {
-          Promise.all([loadFriends(), loadFriendRequests()]);
+          console.log('Friend request accepted');
+          setTimeout(async () => {
+            await Promise.all([loadFriends(), loadFriendRequests()]);
+          }, 1000);
+        }
+      });
+    });
+
+    const unsubscribeDeclined = eventWatcher.watchFriendRequestDeclined((logs) => {
+      logs.forEach((log: any) => {
+        if (log.args.from.toLowerCase() === address.toLowerCase() || 
+            log.args.to.toLowerCase() === address.toLowerCase()) {
+          console.log('Friend request declined');
+          setTimeout(() => loadFriendRequests(), 1000);
+        }
+      });
+    });
+
+    const unsubscribeRemoved = eventWatcher.watchFriendshipRemoved((logs) => {
+      logs.forEach((log: any) => {
+        if (log.args.user1.toLowerCase() === address.toLowerCase() || 
+            log.args.user2.toLowerCase() === address.toLowerCase()) {
+          console.log('Friendship removed');
+          setTimeout(() => loadFriends(), 1000);
         }
       });
     });
@@ -361,6 +472,8 @@ export const useFriends = (): UseFriendsReturn => {
     return () => {
       unsubscribeRequests?.();
       unsubscribeAccepted?.();
+      unsubscribeDeclined?.();
+      unsubscribeRemoved?.();
     };
   }, [address, loadFriends, loadFriendRequests]);
 
@@ -378,5 +491,6 @@ export const useFriends = (): UseFriendsReturn => {
     searchFriendByUsername,
     refreshFriends,
     refreshRequests,
+    getFriendSuggestions,
   };
 };
