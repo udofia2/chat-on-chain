@@ -25,7 +25,7 @@ export const getPublicClient = (chainId: number = 11155111) => {
   
   return createPublicClient({
     chain,
-    transport: http(),
+    transport: http("https://ethereum-sepolia-public.nodies.app"),
   });
 };
 
@@ -37,10 +37,11 @@ export const getWalletClient = (chainId: number = 11155111) => {
   
   return createWalletClient({
     chain,
-    transport: http(),
+    transport: http("https://ethereum-sepolia-public.nodies.app"),
   });
 };
 
+console.log(await getWalletClient().getAddresses())
 /**
  * ENS Contract Functions
  */
@@ -109,6 +110,8 @@ export class EnsContractService {
   async registerUsername(username: string) {
     const contract = this.getWriteContract();
     const fee = await this.getRegistrationFee();
+      console.log(contract)
+
     return await contract.write.register([username], {
       value: fee,
     });

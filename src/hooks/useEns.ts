@@ -43,8 +43,15 @@ export const useEns = (): UseEnsReturn => {
     if (!userAddress && !address) return;
     
     const targetAddress = userAddress || address!;
+
+      // Prevent state updates during initial render
+    if (!targetAddress) return;
+
     setIsLoading(true);
     setError(null);
+
+     // Add a small delay to ensure component is mounted
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     try {
       // Check if user is registered first
@@ -148,6 +155,7 @@ export const useEns = (): UseEnsReturn => {
     try {
       // Check availability first
       const isAvailable = await checkUsernameAvailability(username);
+      
       if (!isAvailable) {
         setError('Username is already taken');
         return false;

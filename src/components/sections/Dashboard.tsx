@@ -5,6 +5,7 @@ import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
 import { motion } from 'framer-motion';
 import { formatDistanceToNow } from 'date-fns';
+import { ContractTest } from './../ContractTest';
 
 export const Dashboard: React.FC = () => {
   const { currentUser, friends, activities } = useStore();
@@ -139,6 +140,40 @@ export const Dashboard: React.FC = () => {
           );
         })}
       </div>
+
+      {/* Test dashboard */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+        className="bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-sm hover:shadow-lg transition-all border border-gray-100 dark:border-gray-700"
+      >
+        <div className="flex items-center justify-between mb-4">
+          <div className="p-3 rounded-xl bg-purple-100 dark:bg-purple-900/30">
+            <Star className="w-6 h-6 text-purple-600 dark:text-purple-400" />
+          </div>
+        </div>
+        
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+            Smart Contracts
+          </h3>
+          <div className="flex items-center justify-between">
+            <span className="text-2xl font-bold text-gray-900 dark:text-white">
+              Test Available
+            </span>
+          </div>
+          
+          <Button variant="primary" size="sm" className="w-full mt-3">
+            <details>
+              <summary className="cursor-pointer">Test Contracts</summary>
+              <div className="mt-4">
+                <ContractTest />
+              </div>
+            </details>
+          </Button>
+        </div>
+      </motion.div>
 
       {/* Recent Activities */}
       <motion.div

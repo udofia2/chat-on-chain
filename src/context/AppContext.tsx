@@ -24,6 +24,7 @@ const queryClient = new QueryClient({
     queries: {
       retry: 3,
       staleTime: 30000,
+      refetchOnWindowFocus: false,
     },
   },
 });
@@ -52,7 +53,7 @@ const config = getDefaultConfig({
     [optimism.id]: http(),
     [arbitrum.id]: http(),
     [base.id]: http(),
-    [sepolia.id]: http(),
+    [sepolia.id]: http("https://ethereum-sepolia-public.nodies.app"),
   },
   ssr: false,
 });
@@ -118,6 +119,7 @@ export const AppProvider: React.FC<AppContextProps> = ({ children }) => {
         <RainbowKitProvider
           modalSize="compact"
           initialChain={defaultChainId}
+          showRecentTransactions={true}
         >
           <AppContext.Provider value={contextValue}>
             {children}
